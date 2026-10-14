@@ -1,0 +1,54 @@
+name: Update bundled whitelist
+
+# Monthly: refreshes whitelist-bundled/iframely-domains.json (used by IFRAMELY_WHITELIST=bundled, for installs that cannot
+# reach iframely.com) and opens a pull request when it changed. Default installs download the list themselves every hour and
+# are not affected. The pull request is only opened if the repository allows it: Settings → Actions → General → "Allow GitHub
+# Actions to create and approve pull requests" (also on the organization).
+
+on:
+  schedule:
+    - cron: "17 5 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Download the list
+        id: dl
+        run: |
+          OUT=$(node scripts/update-whitelist.mjs)
+          echo "$OUT"
+          echo "summary=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.dl.outputs.summary }}
+        run: |
+          if git diff --quiet -- whitelist-bundled; then
+            echo "No change this month."
+            exit 0
+          fi
+          BRANCH="whitelist/$(date -u +%Y-%m)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add whitelist-bundled
+          git commit -m "Refresh bundled whitelist ($(date -u +%Y-%m))" -m "$SUMMARY"
+          git push --force origin "$BRANCH"
+          gh pr create --base dev --head "$BRANCH" --title "Refresh bundled whitelist ($(date -u +%Y-%m))" \
+            --body "Monthly refresh of \`whitelist-bundled/iframely-domains.json\` from iframely.com: $SUMMARY. Merge, then tag a release if air-gapped installs should get it." \
+            || gh pr edit "$BRANCH" --body "Monthly refresh of \`whitelist-bundled/iframely-domains.json\` from iframely.com: $SUMMARY."

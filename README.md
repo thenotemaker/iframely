@@ -1,3 +1,5 @@
+> **thenotemaker fork.** This repository is [thenotemaker/iframely](https://github.com/thenotemaker/iframely), a fork of [itteco/iframely](https://github.com/itteco/iframely) used by [NoteMaker](https://github.com/thenotemaker/notemaker). What differs from upstream, the extra environment variables and how images are released: [docs/THENOTEMAKER.md](docs/THENOTEMAKER.md).
+
 # Iframely URL engine for previews and embeds
 
 This is the engine behind the [Iframely](https://iframely.com) service. Give it a URL and it returns the metadata: title, description, thumbnails, author, canonical URL. If allowed, and if the provider supports it, you also get embed HTML for videos, posts, maps, slideshows, etc.

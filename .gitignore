@@ -18,3 +18,6 @@ iframely-private-plugins/
 config.providers.js
 .vscode/launch.json
 .npmrc
+
+# thenotemaker fork: the bundled domain list is committed (see docs/THENOTEMAKER.md)
+!whitelist-bundled/iframely-*.json
