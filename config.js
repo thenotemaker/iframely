@@ -474,6 +474,41 @@
 
     Object.assign(config, local);
 
+    // thenotemaker fork: environment overrides, applied after the config files so a container can be set up with env alone.
+    // See docs/THENOTEMAKER.md.
+    var env = process.env;
+
+    // IFRAMELY_WHITELIST: unset or "download" = upstream behaviour (domain list fetched from iframely.com every hour);
+    // "bundled" = the list shipped in ./whitelist-bundled, nothing is fetched (air-gapped installs).
+    if (env.IFRAMELY_WHITELIST === 'bundled') {
+        config.WHITELIST_DIR = path.resolve(__dirname, 'whitelist-bundled');
+        config.WHITELIST_URL = '';
+    } else if (env.IFRAMELY_WHITELIST && env.IFRAMELY_WHITELIST !== 'download') {
+        throw new Error('IFRAMELY_WHITELIST must be "download" or "bundled", got "' + env.IFRAMELY_WHITELIST + '"');
+    }
+    if (env.IFRAMELY_WHITELIST_URL) {
+        config.WHITELIST_URL = env.IFRAMELY_WHITELIST_URL;
+    }
+
+    // REDIS_URL turns on the Redis cache (otherwise the per-process node-cache stays).
+    if (env.REDIS_URL) {
+        config.CACHE_ENGINE = 'redis';
+        config.REDIS_MODE = 'standard';
+        config.REDIS_OPTIONS = {url: env.REDIS_URL};
+    }
+    if (env.IFRAMELY_CACHE_TTL) {
+        config.CACHE_TTL = parseInt(env.IFRAMELY_CACHE_TTL, 10);
+    }
+
+    // Number of worker processes; the default is one per CPU, which is a lot in a container that sees the host's cores.
+    if (env.IFRAMELY_WORKERS_COUNT) {
+        config.CLUSTER_WORKERS_COUNT = parseInt(env.IFRAMELY_WORKERS_COUNT, 10);
+    }
+
+    if (env.IFRAMELY_USER_AGENT) {
+        config.USER_AGENT = env.IFRAMELY_USER_AGENT;
+    }
+
     if (!config.baseStaticUrl) {
         config.baseStaticUrl = config.baseAppUrl + config.relativeStaticUrl;
     }

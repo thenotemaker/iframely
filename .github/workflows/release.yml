@@ -1,0 +1,173 @@
+name: Release image
+
+# thenotemaker fork: builds and publishes thenotemaker/iframely to Docker Hub. It runs only when asked, never on a push to a
+# branch: push a tag vX.Y.Z (or run this workflow by hand on a tag) to publish; run it by hand on a branch for a dry run that
+# builds and smoke-tests the image without logging in or pushing. See docs/THENOTEMAKER.md.
+#
+# Docker Hub login is OIDC (no stored password or token), exactly like thenotemaker/notemaker: the Docker organization's OIDC
+# connection (Docker Home → Identity & auth → OIDC connections) must trust this repository's v*.*.* tags with read & write on
+# the thenotemaker/iframely image, and its id is the organization secret DOCKERHUB_OIDC_CONNECTION_ID (shared with this repo).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      arm64:
+        description: "Also build linux/arm64 (slower, built under emulation; amd64 is always built)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NAMESPACE: thenotemaker
+  IMAGE: thenotemaker/iframely
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Only a tag publishes. A manual run on a branch is a dry run.
+      PUBLISH: ${{ github.ref_type == 'tag' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: v
+        run: |
+          UPSTREAM=$(node -p "require('./package.json').version")
+          if [ "$PUBLISH" = "true" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::Tag must look like vX.Y.Z, got '$TAG'"; exit 1 ;; esac
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dry-run" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "Publishing: $PUBLISH (upstream package.json $UPSTREAM)"
+
+      - name: Check the Docker Hub OIDC connection id
+        if: env.PUBLISH == 'true'
+        env:
+          CONNECTION: ${{ secrets.DOCKERHUB_OIDC_CONNECTION_ID }}
+        run: |
+          if [ -z "$CONNECTION" ]; then
+            echo "::error::DOCKERHUB_OIDC_CONNECTION_ID is not available to this repository. Share the organization secret with thenotemaker/iframely (Organization settings → Secrets and variables → Actions → repository access)."
+            exit 1
+          fi
+
+      - name: Show the OIDC claims Docker Hub will see
+        if: env.PUBLISH == 'true'
+        # Prints only the identifying claims (never the token), so the subject in the Docker OIDC connection can be compared
+        # with what GitHub really sends. A mismatch shows up as "access_denied" at the login step.
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          req = urllib.request.Request(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=docker", headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          token = json.load(urllib.request.urlopen(req))["value"]
+          body = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+          keep = ("iss", "sub", "aud", "repository", "repository_id", "repository_owner", "repository_owner_id", "ref", "job_workflow_ref", "event_name")
+          print(json.dumps({k: claims.get(k) for k in keep}, indent=2))
+          PY
+
+      - uses: docker/setup-qemu-action@v4
+        if: github.event.inputs.arm64 == 'true' || vars.RELEASE_ARM64 == 'true'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build for the smoke test (amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: iframely:smoke
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            REVISION=${{ github.sha }}
+
+      - name: Smoke test
+        run: |
+          set -u
+          wait_ready() { # $1 = container
+            for i in $(seq 1 60); do
+              if curl -fsS "http://127.0.0.1:8061/health_check" >/dev/null 2>&1; then return 0; fi
+              sleep 2
+            done
+            echo "::error::$1 did not become ready"; docker logs "$1" | tail -50; return 1
+          }
+          check_example() {
+            OUT=$(curl -fsS -m 30 "http://127.0.0.1:8061/iframely?url=https://example.com/")
+            echo "$OUT" | head -c 300; echo
+            echo "$OUT" | grep -q "Example Domain" || { echo "::error::example.com did not resolve to its title"; exit 1; }
+          }
+
+          echo "--- default: domain list downloaded from iframely.com"
+          docker run -d --name if-default -p 8061:8061 -e IFRAMELY_WORKERS_COUNT=1 iframely:smoke
+          wait_ready if-default
+          check_example
+          docker logs if-default 2>&1 | grep -q "Loading domains list from https://iframely.com/qa/domains.json" || { echo "::error::default mode did not load the list from iframely.com"; docker logs if-default | tail -30; exit 1; }
+          docker inspect --format '{{.State.Health.Status}}' if-default
+          docker rm -f if-default >/dev/null
+
+          echo "--- IFRAMELY_WHITELIST=bundled: nothing fetched"
+          docker run -d --name if-bundled -p 8061:8061 -e IFRAMELY_WORKERS_COUNT=1 -e IFRAMELY_WHITELIST=bundled iframely:smoke
+          wait_ready if-bundled
+          check_example
+          LOG=$(docker logs if-bundled 2>&1)
+          echo "$LOG" | grep -q "Domains list activated" || { echo "::error::bundled list was not activated"; echo "$LOG" | tail -30; exit 1; }
+          if echo "$LOG" | grep -q "Loading domains list from"; then echo "::error::bundled mode still tried to download the list"; exit 1; fi
+          docker rm -f if-bundled >/dev/null
+
+          echo "--- image hygiene"
+          if docker run --rm --entrypoint sh iframely:smoke -c 'command -v npm' >/dev/null 2>&1; then echo "::error::npm is still in the image"; exit 1; fi
+          docker run --rm --entrypoint id iframely:smoke -u | grep -qv '^0$' || { echo "::error::image runs as root"; exit 1; }
+
+      - name: Log in to Docker Hub
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.NAMESPACE }}
+        env:
+          DOCKERHUB_OIDC_CONNECTIONID: ${{ secrets.DOCKERHUB_OIDC_CONNECTION_ID }}
+
+      - name: Image tags and labels
+        id: meta
+        if: env.PUBLISH == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+          labels: |
+            io.thenotemaker.iframely.upstream-version=${{ steps.v.outputs.upstream }}
+
+      - name: Build and push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ (github.event.inputs.arm64 == 'true' || vars.RELEASE_ARM64 == 'true') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true
+
+      - name: Summary
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            echo "Published ${IMAGE}:${{ steps.v.outputs.version }} (upstream package version ${{ steps.v.outputs.upstream }})" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dry run: built and smoke-tested, nothing pushed. Push a tag vX.Y.Z to publish." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
