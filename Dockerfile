@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:24-alpine
 
 # thenotemaker fork. The release workflow passes the real values (docs/THENOTEMAKER.md).
 ARG VERSION=dev
