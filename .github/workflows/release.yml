@@ -34,7 +34,7 @@ jobs:
       # Only a tag publishes. A manual run on a branch is a dry run.
       PUBLISH: ${{ github.ref_type == 'tag' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve version
         id: v
